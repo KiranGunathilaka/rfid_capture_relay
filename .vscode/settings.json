@@ -13,7 +13,9 @@
     "idf.gitPath": "C:/Users/META/.espressif/tools/idf-git/2.39.2/cmd/git.exe",
     "files.associations": {
         "*.h": "c",
-        "*.c": "c"
+        "*.c": "c",
+        "cmath": "c",
+        "complex": "c"
     },
     "C_Cpp.default.compilerPath": "C:/Users/META/.espressif/tools/xtensa-esp32s3-elf/esp-12.2.0_20230208/xtensa-esp32s3-elf/bin/xtensa-esp32s3-elf-gcc.exe"
 }
