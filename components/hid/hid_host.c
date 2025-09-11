@@ -19,6 +19,8 @@
 
 #include "hid_host.h"
 
+uint32_t timeout = 500;
+
 // HID spinlock
 static portMUX_TYPE hid_lock = portMUX_INITIALIZER_UNLOCKED;
 #define HID_ENTER_CRITICAL() portENTER_CRITICAL(&hid_lock)
@@ -767,8 +769,8 @@ static esp_err_t hid_class_request_set(hid_device_t *hid_device,
     HID_RETURN_ON_INVALID_ARG(hid_device);
     HID_RETURN_ON_INVALID_ARG(hid_device->ctrl_xfer);
 
-    HID_RETURN_ON_ERROR(hid_device_wait_ready(hid_device, 5000 /* timeout */));
-    HID_RETURN_ON_ERROR(hid_device_claim(hid_device, 5000 /* timeout */));
+    HID_RETURN_ON_ERROR(hid_device_wait_ready(hid_device, timeout /* timeout */));
+    HID_RETURN_ON_ERROR(hid_device_claim(hid_device, timeout /* timeout */));
 
     usb_setup_packet_t *setup = (usb_setup_packet_t *)ctrl_xfer->data_buffer;
     setup->bmRequestType = USB_BM_REQUEST_TYPE_DIR_OUT |
@@ -779,7 +781,7 @@ static esp_err_t hid_class_request_set(hid_device_t *hid_device,
     setup->wIndex = wIndex;
     setup->wLength = wLength;
 
-    ret = hid_control_transfer(hid_device, ctrl_xfer, USB_SETUP_PACKET_SIZE, 5000 /* timeout */);
+    ret = hid_control_transfer(hid_device, ctrl_xfer, USB_SETUP_PACKET_SIZE, timeout /* timeout */);
 
     hid_device_release(hid_device);
 
@@ -811,8 +813,8 @@ static esp_err_t hid_class_request_get(hid_device_t *hid_device,
 
     usb_transfer_t *ctrl_xfer = hid_device->ctrl_xfer;
 
-    HID_RETURN_ON_ERROR(hid_device_wait_ready(hid_device, 5000 /* timeout */));
-    HID_RETURN_ON_ERROR(hid_device_claim(hid_device, 5000 /* timeout */));
+    HID_RETURN_ON_ERROR(hid_device_wait_ready(hid_device, timeout /* timeout */));
+    HID_RETURN_ON_ERROR(hid_device_claim(hid_device, timeout /* timeout */));
 
     usb_setup_packet_t *setup = (usb_setup_packet_t *)ctrl_xfer->data_buffer;
 
@@ -824,7 +826,7 @@ static esp_err_t hid_class_request_get(hid_device_t *hid_device,
     setup->wIndex = wIndex;
     setup->wLength = length;
 
-    ret = hid_control_transfer(hid_device, ctrl_xfer, USB_SETUP_PACKET_SIZE + length, 5000 /* timeout */);
+    ret = hid_control_transfer(hid_device, ctrl_xfer, USB_SETUP_PACKET_SIZE + length, timeout /* timeout */);
 
     if (ESP_OK == ret)
     {
@@ -1132,7 +1134,7 @@ esp_err_t hid_host_claim_interface(const hid_host_interface_config_t *iface_conf
     iface->report_cb = iface_config->callback;
 
     // Start interrupt IN transfers (keep this fatal)
-    HID_RETURN_ON_ERROR(hid_host_iface_start_transfer(iface, 5000 /* timeout */));
+    HID_RETURN_ON_ERROR(hid_host_iface_start_transfer(iface, timeout /* timeout */));
 
     interface_user_callback(iface, HID_DEVICE_INTERFACE_CLAIM);
     *iface_handle = iface;

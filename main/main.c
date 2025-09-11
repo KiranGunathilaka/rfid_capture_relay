@@ -17,124 +17,102 @@
 #include "errno.h"
 #include "driver/gpio.h"
 #include <string.h>
+#include <inttypes.h>
+#include "config.h"
+#include "nvs_flash.h"
 
 #include "hid_host.h"
 #include "hid_usage_keyboard.h"
 #include "hid_usage_mouse.h"
 
-#define APP_QUIT_PIN GPIO_NUM_0
-#define APP_QUIT_PIN_POLL_MS 500
+#include "esp_wifi.h"
+#include "esp_now.h"
 
-#define READY_TO_UNINSTALL (HOST_NO_CLIENT | HOST_ALL_FREE)
+static const char *TAG_NOW = "ESP-NOW";
 
-/* Main char symbol for ENTER key */
-#define KEYBOARD_ENTER_MAIN_CHAR '\r'
-/* When set to 1 pressing ENTER will be extending with LineFeed during serial debug output */
-#define KEYBOARD_ENTER_LF_EXTEND 1
+rfid_msg_t msg;
+status_msg_t resp;
 
-static char rfid_buf[64];
-static size_t rfid_len = 0;
-
-/**
- * @brief Application Event from USB Host driver
- *
- */
-typedef enum
+static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status)
 {
-    HOST_NO_CLIENT = 0x1,
-    HOST_ALL_FREE = 0x2,
-    DEVICE_CONNECTED = 0x4,
-    DEVICE_DISCONNECTED = 0x8,
-    DEVICE_ADDRESS_MASK = 0xFF0,
-} app_event_t;
+    ESP_LOGI(TAG_NOW, "Send status: %s", status == ESP_NOW_SEND_SUCCESS ? "OK" : "FAIL");
+}
 
-/**
- * @brief Key event
- *
- */
-typedef struct
+void espnow_init(void)
 {
-    enum key_state
+    // Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    ESP_ERROR_CHECK(esp_now_init());
+    esp_now_register_send_cb(espnow_send_cb);
+}
+
+
+void reader_setup_peer(void)
+{
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, peer_mac, 6);
+    peer.channel = 0;
+    peer.encrypt = false;
+    ESP_ERROR_CHECK(esp_now_add_peer(&peer));
+}
+
+void send_uid(const char *uid_str)
+{
+    memset(&msg, 0, sizeof(msg));
+
+    strncpy(msg.uid, uid_str, sizeof(msg.uid) - 1);
+
+    // simple obfuscation: XOR every char with SECRET_KEY LSB
+    for (size_t i = 0; i < strlen(msg.uid); i++)
     {
-        KEY_STATE_PRESSED = 0x00,
-        KEY_STATE_RELEASED = 0x01
-    } state;
-    uint8_t modifier;
-    uint8_t key_code;
-} key_event_t;
+        msg.uid[i] ^= (SECRET_KEY & 0xFF);
+    }
 
-#define USB_EVENTS_TO_WAIT (DEVICE_CONNECTED | DEVICE_ADDRESS_MASK | DEVICE_DISCONNECTED)
+    esp_now_send(peer_mac, (uint8_t *)&msg, sizeof(msg));
+}
 
-static const char *TAG = "example";
-static EventGroupHandle_t usb_flags;
-static bool hid_device_connected = false;
+static void reader_recv_cb(const esp_now_recv_info_t *info,
+                           const uint8_t *data, int len)
+{
+    if (len < sizeof(status_msg_t)) return;
 
-hid_host_interface_handle_t keyboard_handle = NULL;
-hid_host_interface_handle_t mouse_handle = NULL;
+    memcpy(&resp, data, sizeof(resp));
 
-/**
- * @brief Scancode to ascii table
- */
-const uint8_t keycode2ascii[57][2] = {
-    {0, 0},                                               /* HID_KEY_NO_PRESS        */
-    {0, 0},                                               /* HID_KEY_ROLLOVER        */
-    {0, 0},                                               /* HID_KEY_POST_FAIL       */
-    {0, 0},                                               /* HID_KEY_ERROR_UNDEFINED */
-    {'a', 'A'},                                           /* HID_KEY_A               */
-    {'b', 'B'},                                           /* HID_KEY_B               */
-    {'c', 'C'},                                           /* HID_KEY_C               */
-    {'d', 'D'},                                           /* HID_KEY_D               */
-    {'e', 'E'},                                           /* HID_KEY_E               */
-    {'f', 'F'},                                           /* HID_KEY_F               */
-    {'g', 'G'},                                           /* HID_KEY_G               */
-    {'h', 'H'},                                           /* HID_KEY_H               */
-    {'i', 'I'},                                           /* HID_KEY_I               */
-    {'j', 'J'},                                           /* HID_KEY_J               */
-    {'k', 'K'},                                           /* HID_KEY_K               */
-    {'l', 'L'},                                           /* HID_KEY_L               */
-    {'m', 'M'},                                           /* HID_KEY_M               */
-    {'n', 'N'},                                           /* HID_KEY_N               */
-    {'o', 'O'},                                           /* HID_KEY_O               */
-    {'p', 'P'},                                           /* HID_KEY_P               */
-    {'q', 'Q'},                                           /* HID_KEY_Q               */
-    {'r', 'R'},                                           /* HID_KEY_R               */
-    {'s', 'S'},                                           /* HID_KEY_S               */
-    {'t', 'T'},                                           /* HID_KEY_T               */
-    {'u', 'U'},                                           /* HID_KEY_U               */
-    {'v', 'V'},                                           /* HID_KEY_V               */
-    {'w', 'W'},                                           /* HID_KEY_W               */
-    {'x', 'X'},                                           /* HID_KEY_X               */
-    {'y', 'Y'},                                           /* HID_KEY_Y               */
-    {'z', 'Z'},                                           /* HID_KEY_Z               */
-    {'1', '!'},                                           /* HID_KEY_1               */
-    {'2', '@'},                                           /* HID_KEY_2               */
-    {'3', '#'},                                           /* HID_KEY_3               */
-    {'4', '$'},                                           /* HID_KEY_4               */
-    {'5', '%'},                                           /* HID_KEY_5               */
-    {'6', '^'},                                           /* HID_KEY_6               */
-    {'7', '&'},                                           /* HID_KEY_7               */
-    {'8', '*'},                                           /* HID_KEY_8               */
-    {'9', '('},                                           /* HID_KEY_9               */
-    {'0', ')'},                                           /* HID_KEY_0               */
-    {KEYBOARD_ENTER_MAIN_CHAR, KEYBOARD_ENTER_MAIN_CHAR}, /* HID_KEY_ENTER           */
-    {0, 0},                                               /* HID_KEY_ESC             */
-    {'\b', 0},                                            /* HID_KEY_DEL             */
-    {0, 0},                                               /* HID_KEY_TAB             */
-    {' ', ' '},                                           /* HID_KEY_SPACE           */
-    {'-', '_'},                                           /* HID_KEY_MINUS           */
-    {'=', '+'},                                           /* HID_KEY_EQUAL           */
-    {'[', '{'},                                           /* HID_KEY_OPEN_BRACKET    */
-    {']', '}'},                                           /* HID_KEY_CLOSE_BRACKET   */
-    {'\\', '|'},                                          /* HID_KEY_BACK_SLASH      */
-    {'\\', '|'},
-    /* HID_KEY_SHARP           */ // HOTFIX: for NonUS Keyboards repeat HID_KEY_BACK_SLASH
-    {';', ':'},                   /* HID_KEY_COLON           */
-    {'\'', '"'},                  /* HID_KEY_QUOTE           */
-    {'`', '~'},                   /* HID_KEY_TILDE           */
-    {',', '<'},                   /* HID_KEY_LESS            */
-    {'.', '>'},                   /* HID_KEY_GREATER         */
-    {'/', '?'}                    /* HID_KEY_SLASH           */
-};
+    if (msg.uid[0] == '\0') { // not initialized yet
+        ESP_LOGW(TAG_NOW, "UID not initialized yet");
+        return;
+    }
+
+    if (resp.auth_key != ((uint8_t)msg.uid[0] ^ (SECRET_KEY & 0xFF))) {
+        ESP_LOGW(TAG_NOW, "Bad auth");
+        return;
+    }
+
+    ESP_LOGI(TAG_NOW,
+             "status=%d event=%d ticket=%s name=%s time=%" PRIu32,
+             resp.status, resp.event_type,
+             resp.ticket_id, resp.name, resp.timestamp);
+
+    if (resp.status == 1) {
+        gpio_set_level(GPIO_NUM_2, 1);
+    } else {
+        gpio_set_level(GPIO_NUM_4, 1);
+    }
+}
 
 /**
  * @brief Makes new line depending on report output protocol type
@@ -236,9 +214,9 @@ static inline void hid_keyboard_print_char(unsigned int key_char)
  */
 static void key_event_callback(key_event_t *key_event)
 {
-    unsigned char key_char;
+    // unsigned char key_char;
 
-    hid_print_new_device_report_header(HID_PROTOCOL_KEYBOARD);
+    // hid_print_new_device_report_header(HID_PROTOCOL_KEYBOARD);
 
     // if (KEY_STATE_PRESSED == key_event->state) {
     //     if (hid_keyboard_get_char(key_event->modifier,
@@ -258,6 +236,7 @@ static void key_event_callback(key_event_t *key_event)
             {
                 rfid_buf[rfid_len] = '\0';
                 printf("\n[RFID] %s\n", rfid_buf);
+                send_uid(rfid_buf);
                 rfid_len = 0;
             }
             return;
@@ -274,8 +253,6 @@ static void key_event_callback(key_event_t *key_event)
             {
                 rfid_buf[rfid_len++] = (char)key_char;
             }
-            // (Optional) still echo raw char:
-            // hid_keyboard_print_char(key_char);
         }
     }
 }
@@ -501,6 +478,10 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(gpio_config(&input_pin));
 
+    espnow_init();
+    esp_now_register_recv_cb(reader_recv_cb);
+    reader_setup_peer();
+
     ESP_LOGI(TAG, "HID HOST example");
 
     usb_flags = xEventGroupCreate();
@@ -513,8 +494,6 @@ void app_main(void)
     ESP_ERROR_CHECK(usb_host_install(&host_config));
     task_created = xTaskCreate(handle_usb_events, "usb_events", 4096, NULL, 2, &usb_events_task_handle);
     assert(task_created);
-
-    hid_host_print_descriptors(hid_device);
 
     // hid host driver config
     const hid_host_driver_config_t hid_host_config = {
