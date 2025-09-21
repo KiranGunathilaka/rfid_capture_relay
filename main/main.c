@@ -33,7 +33,7 @@ static const char *TAG_NOW = "ESP-NOW";
 rfid_msg_t msg;
 status_msg_t resp;
 
-static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status)
+static void espnow_send_cb(const esp_now_send_info_t *tx_info, esp_now_send_status_t status)
 {
     ESP_LOGI(TAG_NOW, "Send status: %s", status == ESP_NOW_SEND_SUCCESS ? "OK" : "FAIL");
 }
@@ -75,6 +75,7 @@ void send_uid(const char *uid_str)
     memset(&msg, 0, sizeof(msg));
 
     strncpy(msg.uid, uid_str, sizeof(msg.uid) - 1);
+    msg.dev_id = device_id;
 
     // simple obfuscation: XOR every char with SECRET_KEY LSB
     for (size_t i = 0; i < strlen(msg.uid); i++)
@@ -482,7 +483,7 @@ void app_main(void)
     esp_now_register_recv_cb(reader_recv_cb);
     reader_setup_peer();
 
-    ESP_LOGI(TAG, "HID HOST example");
+    ESP_LOGI(TAG, "RFID Capture & Relay Started");
 
     usb_flags = xEventGroupCreate();
     assert(usb_flags);

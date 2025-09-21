@@ -16,6 +16,8 @@
 static char rfid_buf[64];
 static size_t rfid_len = 0;
 
+static uint8_t const device_id = 101;
+
 /**
  * @brief Application Event from USB Host driver
  *
@@ -118,6 +120,7 @@ const uint8_t keycode2ascii[57][2] = {
 };
 
 typedef struct {
+    uint8_t dev_id; // device ID
     char uid[64];   // RFID string
 } rfid_msg_t;
 
