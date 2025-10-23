@@ -322,6 +322,77 @@ static void effect_rainbow(int delay_ms)
     vTaskDelay(pdMS_TO_TICKS(delay_ms));
 }
 
+// ---------- LED one-shot flash helpers (non-blocking) ----------
+static esp_timer_handle_t led_clear_timer = NULL;
+
+static void led_clear_cb(void *arg)
+{
+    clear_all();
+}
+
+// set whole strip to a color, then auto-clear after duration_ms (non-blocking)
+static void led_flash_color(uint8_t r, uint8_t g, uint8_t b, uint32_t duration_ms)
+{
+    effect_fill(r, g, b); // fast (single refresh)
+    if (!led_clear_timer)
+    {
+        const esp_timer_create_args_t targs = {.callback = led_clear_cb, .name = "led_clear"};
+        ESP_ERROR_CHECK(esp_timer_create(&targs, &led_clear_timer));
+    }
+    else
+    {
+        timer_stop_if_active(led_clear_timer);
+    }
+    ESP_ERROR_CHECK(esp_timer_start_once(led_clear_timer, (uint64_t)duration_ms * 1000));
+}
+
+// quick double flash in the same color (non-blocking chain)
+static void led_dbl_step(void *arg)
+{
+    led_dbl_t *s = (led_dbl_t *)arg;
+    if (!s->count)
+    {
+        clear_all();
+        return;
+    }
+    s->count--;
+    effect_fill(s->r, s->g, s->b);
+    // off after 120ms, then on again in 240ms total
+    static esp_timer_handle_t off_t = NULL;
+    if (!off_t)
+    {
+        const esp_timer_create_args_t off_args = {.callback = led_clear_cb, .name = "led_off"};
+        ESP_ERROR_CHECK(esp_timer_create(&off_args, &off_t));
+    }
+    else
+    {
+        timer_stop_if_active(off_t);
+    }
+    ESP_ERROR_CHECK(esp_timer_start_once(off_t, 120000)); // 120ms
+
+    // schedule next on in ~240ms
+    if (!s->t)
+    {
+        const esp_timer_create_args_t on_args = {.callback = led_dbl_step, .arg = s, .name = "led_on"};
+        ESP_ERROR_CHECK(esp_timer_create(&on_args, &s->t));
+    }
+    else
+    {
+        timer_stop_if_active(s->t);
+    }
+    ESP_ERROR_CHECK(esp_timer_start_once(s->t, 240000)); // 240ms
+}
+static void led_double_flash(uint8_t r, uint8_t g, uint8_t b)
+{
+    static led_dbl_t seq = {0};
+    seq.r = r;
+    seq.g = g;
+    seq.b = b;
+    seq.count = 2;
+    led_dbl_step(&seq);
+}
+
+
 // -------------------- ESP-NOW ------------------------------------
 rfid_msg_t msg;
 status_msg_t resp;
@@ -388,14 +459,16 @@ static void reader_recv_cb(const esp_now_recv_info_t *info,
     memcpy(&resp, data, sizeof(resp));
 
     if (msg.uid[0] == '\0')
-    { // not initialized yet
+    {
         ESP_LOGW(TAG_NOW, "UID not initialized yet");
         return;
     }
-
     if (resp.auth_key != ((uint8_t)msg.uid[0] ^ (SECRET_KEY & 0xFF)))
     {
         ESP_LOGW(TAG_NOW, "Bad auth");
+        // Red single flash + error chirp
+        led_flash_color(60, 0, 0, 300);
+        buzzer_error();
         return;
     }
 
@@ -404,13 +477,55 @@ static void reader_recv_cb(const esp_now_recv_info_t *info,
              resp.status, resp.event_type,
              resp.ticket_id, resp.name, resp.timestamp);
 
+    // drive the two indicator GPIOs (optional)
+    gpio_set_level(GPIO_NUM_2, resp.status == 1 ? 1 : 0);
+    gpio_set_level(GPIO_NUM_4, resp.status == 1 ? 0 : 1);
+
+    // ---- Decide LED + buzzer pattern ----
     if (resp.status == 1)
     {
-        gpio_set_level(GPIO_NUM_2, 1);
+        // granted
+        switch (resp.event_type)
+        {
+        case EVT_ENTRY:
+            // green double-flash + success tri-tone
+            led_double_flash(0, 60, 0);
+            buzzer_success();
+            break;
+        case EVT_EXIT:
+            // cyan single flash + short beep
+            led_flash_color(0, 40, 40, 250);
+            buzzer_beep();
+            break;
+        default:
+            // granted but unknown event → soft white flash + single beep
+            led_flash_color(40, 40, 40, 250);
+            buzzer_beep();
+            break;
+        }
     }
     else
     {
-        gpio_set_level(GPIO_NUM_4, 1);
+        // denied / warning
+        switch (resp.event_type)
+        {
+        case EVT_DENIED:
+            // strong red flash (longer) + error melody
+            led_flash_color(80, 0, 0, 600);
+            buzzer_error();
+            break;
+        case EVT_WRONG_GATE:
+            // amber (yellowish) double flash + two medium beeps
+            led_double_flash(70, 35, 0);
+            buzzer_tone(1200, 120, 500);
+            buzzer_tone(900, 120, 500); // queued via timer chain in melody? Keep quick second call after ~150ms if you want
+            break;
+        default:
+            // unknown not-granted → magenta flash + short beep
+            led_flash_color(60, 0, 60, 300);
+            buzzer_beep();
+            break;
+        }
     }
 }
 
@@ -515,18 +630,6 @@ static inline void hid_keyboard_print_char(unsigned int key_char)
  */
 static void key_event_callback(key_event_t *key_event)
 {
-    // unsigned char key_char;
-
-    // hid_print_new_device_report_header(HID_PROTOCOL_KEYBOARD);
-
-    // if (KEY_STATE_PRESSED == key_event->state) {
-    //     if (hid_keyboard_get_char(key_event->modifier,
-    //                               key_event->key_code, &key_char)) {
-
-    //         hid_keyboard_print_char(key_char);
-
-    //     }
-    // }
 
     if (KEY_STATE_PRESSED == key_event->state)
     {
@@ -767,38 +870,53 @@ static bool wait_for_event(EventBits_t event, TickType_t timeout)
 
 void app_main(void)
 {
-    // Buzzer init
+    // 0) Configure status pins as outputs once
+    const gpio_config_t out_pins = {
+        .pin_bit_mask = (1ULL << GPIO_NUM_2) | (1ULL << GPIO_NUM_4),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE};
+    ESP_ERROR_CHECK(gpio_config(&out_pins));
+    gpio_set_level(GPIO_NUM_2, 0);
+    gpio_set_level(GPIO_NUM_4, 0);
+
+    // 1) Buzzer init
     buzzer_init();
 
-    // LED Init
+    // 2) LED Init
     ESP_LOGI(TAG_LED, "Initializing RMT + LED strip driver...");
+    gpio_reset_pin(LED_GPIO); // (helps if the pin was used earlier)
+    // optional: gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
 
-    // Create LED strip device (WS2812 @ 800kHz)
     led_strip_config_t strip_cfg = {
-        .strip_gpio_num = LED_GPIO, // Not used when binding to a channel directly
+        .strip_gpio_num = LED_GPIO,
         .max_leds = LED_COUNT,
         .led_model = LED_MODEL_WS2812,
         .color_component_format = LED_COLOR_ORDER,
         .flags = {.invert_out = 0},
     };
-
     led_strip_rmt_config_t rmt_cfg = {
         .clk_src = RMT_CLK_SRC_DEFAULT,
         .resolution_hz = RMT_RES_HZ,
         .mem_block_symbols = 64,
     };
-
-    // Bind to existing channel (preferred in IDF 5.x):
     ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_cfg, &rmt_cfg, &strip));
-    // Or: ESP_ERROR_CHECK(led_strip_new_rmt_ws2812(&strip_cfg, &rmt_cfg, &strip)); // depending on your IDF minor
-
-    // Clear the LEDs
     clear_all();
 
+    // 3) Startup animation (quick and non-blocking)
+    //   • blue flash, then green, then white; success chirp
+    led_flash_color(0, 0, 60, 200);
+    vTaskDelay(pdMS_TO_TICKS(240));
+    led_flash_color(0, 60, 0, 200);
+    vTaskDelay(pdMS_TO_TICKS(240));
+    led_flash_color(40, 40, 40, 220);
+    buzzer_success();
+
+    // ---- the rest of your original app_main() stays the same ----
     // RTOS Init and HID init
     TaskHandle_t usb_events_task_handle;
     hid_host_device_handle_t hid_device;
-
     BaseType_t task_created;
 
     const gpio_config_t input_pin = {
@@ -820,12 +938,10 @@ void app_main(void)
     const usb_host_config_t host_config = {
         .skip_phy_setup = false,
         .intr_flags = ESP_INTR_FLAG_LEVEL1};
-
     ESP_ERROR_CHECK(usb_host_install(&host_config));
     task_created = xTaskCreate(handle_usb_events, "usb_events", 4096, NULL, 2, &usb_events_task_handle);
     assert(task_created);
 
-    // hid host driver config
     const hid_host_driver_config_t hid_host_config = {
         .create_background_task = true,
         .task_priority = 5,
@@ -833,44 +949,37 @@ void app_main(void)
         .core_id = 0,
         .callback = hid_host_event_callback,
         .callback_arg = NULL};
-
     ESP_ERROR_CHECK(hid_host_install(&hid_host_config));
 
     do
     {
-        EventBits_t event = xEventGroupWaitBits(usb_flags, USB_EVENTS_TO_WAIT, pdTRUE, pdFALSE, pdMS_TO_TICKS(APP_QUIT_PIN_POLL_MS));
+        EventBits_t event = xEventGroupWaitBits(
+            usb_flags, USB_EVENTS_TO_WAIT, pdTRUE, pdFALSE,
+            pdMS_TO_TICKS(APP_QUIT_PIN_POLL_MS));
 
         if (event & DEVICE_CONNECTED)
         {
             xEventGroupClearBits(usb_flags, DEVICE_CONNECTED);
             hid_device_connected = true;
         }
-
         if (event & DEVICE_ADDRESS_MASK)
         {
             xEventGroupClearBits(usb_flags, DEVICE_ADDRESS_MASK);
-
             const hid_host_device_config_t hid_host_device_config = {
                 .dev_addr = (event & DEVICE_ADDRESS_MASK) >> 4,
                 .iface_event_cb = hid_host_interface_event_callback,
                 .iface_event_arg = NULL,
             };
-
             ESP_ERROR_CHECK(hid_host_install_device(&hid_host_device_config, &hid_device));
         }
-
         if (event & DEVICE_DISCONNECTED)
         {
             xEventGroupClearBits(usb_flags, DEVICE_DISCONNECTED);
-
             hid_host_release_interface(keyboard_handle);
             hid_host_release_interface(mouse_handle);
-
             ESP_ERROR_CHECK(hid_host_uninstall_device(hid_device));
-
             hid_device_connected = false;
         }
-
     } while (gpio_get_level(APP_QUIT_PIN) != 0);
 
     if (hid_device_connected)

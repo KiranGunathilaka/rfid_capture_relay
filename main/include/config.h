@@ -2,6 +2,7 @@
 #define CONFIG_H
 
 #include "hid_host.h"
+#include "esp_timer.h"
 
 #define APP_QUIT_PIN GPIO_NUM_0
 #define APP_QUIT_PIN_POLL_MS 500
@@ -133,6 +134,13 @@ typedef struct {
     uint32_t auth_key;     // simple shared secret for authenticity
 } status_msg_t;
 
+// ---- Event type codes from the server side ----
+#define EVT_ENTRY       1   // granted entry
+#define EVT_EXIT        2   // granted exit
+#define EVT_DENIED      3   // denied (bad/unknown)
+#define EVT_WRONG_GATE  4   // valid but wrong gate
+
+
 #define SECRET_KEY 0xA5A5F00D
 
 static uint8_t peer_mac[] = {0xF8,0xB3,0xB7,0x26,0x47,0x0C}; //F8:B3:B7:26:47:0C
@@ -142,6 +150,13 @@ static uint8_t peer_mac[] = {0xF8,0xB3,0xB7,0x26,0x47,0x0C}; //F8:B3:B7:26:47:0C
 #define LED_COUNT           60         // Number of LEDs
 #define LED_COLOR_ORDER     LED_STRIP_COLOR_COMPONENT_FMT_GRB   // WS2812 = GRB
 #define RMT_RES_HZ          10*1000*1000 // 10 MHz RMT tick for accurate WS2812 timings
+
+typedef struct
+{
+    uint8_t r, g, b;
+    uint8_t count;
+    esp_timer_handle_t t;
+} led_dbl_t;
 
 // --- Buzzer config ------------
 #define BUZZER_GPIO        7
