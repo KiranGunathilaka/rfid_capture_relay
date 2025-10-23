@@ -16,7 +16,6 @@
 #include "usb/usb_host.h"
 #include "errno.h"
 #include "driver/gpio.h"
-#include <string.h>
 #include <inttypes.h>
 #include "config.h"
 #include "nvs_flash.h"
@@ -28,8 +27,302 @@
 #include "esp_wifi.h"
 #include "esp_now.h"
 
-static const char *TAG_NOW = "ESP-NOW";
+#include "led_strip.h"     // IDF 5.x LED strip abstraction
+#include "driver/rmt_tx.h" // RMT transmitter
 
+#include "driver/ledc.h"
+#include "esp_timer.h"
+
+static const char *TAG_NOW = "ESP-NOW";
+static const char *TAG_LED = "WS2812";
+static const char *TAG_BUZ = "BUZZER";
+
+// --------------- Buzzer -----------------------------
+
+static bool buzzer_is_init = false;
+static esp_timer_handle_t buzzer_stop_timer = NULL;
+
+// Safe-stop helper: only stop a timer if it's active
+static inline void timer_stop_if_active(esp_timer_handle_t t)
+{
+    if (!t)
+        return;
+    if (esp_timer_is_active(t))
+    {
+        ESP_ERROR_CHECK(esp_timer_stop(t));
+    }
+}
+
+static void buzzer_gpio_init_active(void)
+{
+    gpio_reset_pin(BUZZER_GPIO);
+    gpio_set_direction(BUZZER_GPIO, GPIO_MODE_OUTPUT);
+    gpio_set_level(BUZZER_GPIO, 0);
+}
+
+static void buzzer_ledc_init_passive(void)
+{
+    // Timer
+    ledc_timer_config_t tcfg = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_10_BIT, // 10-bit duty (0..1023)
+        .timer_num = LEDC_TIMER_0,
+        .freq_hz = 2000, // default 2 kHz; will change per tone
+        .clk_cfg = LEDC_AUTO_CLK};
+    ESP_ERROR_CHECK(ledc_timer_config(&tcfg));
+
+    // Channel
+    ledc_channel_config_t ccfg = {
+        .gpio_num = BUZZER_GPIO,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel = LEDC_CHANNEL_0,
+        .intr_type = LEDC_INTR_DISABLE,
+        .timer_sel = LEDC_TIMER_0,
+        .duty = 0, // start silent
+        .hpoint = 0};
+    ESP_ERROR_CHECK(ledc_channel_config(&ccfg));
+}
+
+static void buzzer_stop_cb(void *arg)
+{
+#if BUZZER_IS_PASSIVE
+    // stop PWM
+    ESP_ERROR_CHECK(ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0));
+#else
+    gpio_set_level(BUZZER_GPIO, 0);
+#endif
+}
+
+static void buzzer_init(void)
+{
+    if (buzzer_is_init)
+        return;
+
+#if BUZZER_IS_PASSIVE
+    buzzer_ledc_init_passive();
+#else
+    buzzer_gpio_init_active();
+#endif
+
+    // Create a reusable one-shot timer to stop tones
+    const esp_timer_create_args_t oneshot_args = {
+        .callback = &buzzer_stop_cb,
+        .name = "buz_stop"};
+    ESP_ERROR_CHECK(esp_timer_create(&oneshot_args, &buzzer_stop_timer));
+
+    buzzer_is_init = true;
+    ESP_LOGI(TAG_BUZ, "Buzzer init done (GPIO %d, %s)", BUZZER_GPIO,
+             BUZZER_IS_PASSIVE ? "passive (LEDC)" : "active (GPIO)");
+}
+
+// Non-blocking: start tone for `duration_ms`, auto-stop via timer
+static void buzzer_tone(uint32_t freq_hz, uint32_t duration_ms, uint16_t volume /*0..1023*/)
+{
+    if (!buzzer_is_init)
+        buzzer_init();
+
+#if BUZZER_IS_PASSIVE
+    if (freq_hz < 50)
+        freq_hz = 50;
+    if (volume > 1023)
+        volume = 1023;
+
+    // update frequency
+    ESP_ERROR_CHECK(ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, freq_hz));
+    // set duty (volume)
+    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, volume));
+    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
+#else
+    // active buzzer ignores freq; just drive it
+    (void)freq_hz;
+    (void)volume;
+    gpio_set_level(BUZZER_GPIO, 1);
+#endif
+
+    if (duration_ms == 0)
+        return; // continuous tone until buzzer_stop() called
+
+    // arm one-shot stop
+    timer_stop_if_active(buzzer_stop_timer);
+    ESP_ERROR_CHECK(esp_timer_start_once(buzzer_stop_timer, (uint64_t)duration_ms * 1000));
+}
+
+static void buzzer_stop(void)
+{
+    if (!buzzer_is_init)
+        return;
+    buzzer_stop_cb(NULL);
+}
+
+// Convenience one-beep (200 ms), nice for clicks
+static void buzzer_beep(void)
+{
+#if BUZZER_IS_PASSIVE
+    buzzer_tone(2000, 180, 400); // 2 kHz, 180 ms, mid volume
+#else
+    buzzer_tone(0, 180, 0);
+#endif
+}
+
+// Simple melodies (success/error) - non-blocking sequencer using esp_timer chain
+typedef struct
+{
+    const uint16_t *freqs;
+    const uint16_t *durms;
+    const uint8_t *vols; // 0..1023, may be NULL to use a default
+    size_t count;
+    size_t index;
+    esp_timer_handle_t timer;
+} buzzer_seq_t;
+
+static void buzzer_seq_step(void *arg);
+
+static void buzzer_seq_start(const uint16_t *f, const uint16_t *d, const uint8_t *v, size_t n)
+{
+    static buzzer_seq_t seq = {0};
+    if (!buzzer_is_init)
+        buzzer_init();
+
+    // stop any current tone & sequence
+    buzzer_stop();
+
+    seq.freqs = f;
+    seq.durms = d;
+    seq.vols = v;
+    seq.count = n;
+    seq.index = 0;
+
+    if (seq.timer == NULL)
+    {
+        const esp_timer_create_args_t args = {.callback = buzzer_seq_step, .arg = &seq, .name = "buz_seq"};
+        ESP_ERROR_CHECK(esp_timer_create(&args, &seq.timer));
+    }
+    else
+    {
+        timer_stop_if_active(seq.timer);
+    }
+
+    // kick first step immediately
+    buzzer_seq_step(&seq);
+}
+
+static void buzzer_seq_step(void *arg)
+{
+    buzzer_seq_t *s = (buzzer_seq_t *)arg;
+    if (s->index >= s->count)
+    {
+        buzzer_stop();
+        return;
+    }
+    uint32_t freq = s->freqs[s->index];
+    uint32_t dur = s->durms[s->index];
+    uint16_t vol = s->vols ? s->vols[s->index] : 400;
+
+#if BUZZER_IS_PASSIVE
+    buzzer_tone(freq, dur, vol);
+#else
+    (void)freq;
+    (void)vol;
+    buzzer_tone(0, dur, 0);
+#endif
+    s->index++;
+    // schedule next note right after this one ends
+    ESP_ERROR_CHECK(esp_timer_start_once(s->timer, (uint64_t)dur * 1000));
+}
+
+// Example tunes
+static void buzzer_success(void)
+{
+    static const uint16_t f[] = {1200, 1600, 2000};
+    static const uint16_t d[] = {100, 100, 160};
+    buzzer_seq_start(f, d, NULL, 3);
+}
+static void buzzer_error(void)
+{
+    static const uint16_t f[] = {400, 300, 250, 200};
+    static const uint16_t d[] = {120, 120, 120, 240};
+    buzzer_seq_start(f, d, NULL, 4);
+}
+
+//----------------------------WS2812 ------------------------
+
+static led_strip_handle_t strip;
+
+static void set_pixel(uint16_t i, uint8_t r, uint8_t g, uint8_t b)
+{
+    // The driver takes raw RGB; color order is handled by config.
+    // Optionally add a global brightness scale here if necessary
+    ESP_ERROR_CHECK(led_strip_set_pixel(strip, i, r, g, b));
+}
+
+static void show(void)
+{
+    ESP_ERROR_CHECK(led_strip_refresh(strip));
+}
+
+static void clear_all(void)
+{
+    ESP_ERROR_CHECK(led_strip_clear(strip));
+}
+
+// Simple wheel for rainbow
+static void color_wheel(uint8_t pos, uint8_t *r, uint8_t *g, uint8_t *b)
+{
+    if (pos < 85)
+    {
+        *r = pos * 3;
+        *g = 255 - pos * 3;
+        *b = 0;
+    }
+    else if (pos < 170)
+    {
+        pos -= 85;
+        *r = 255 - pos * 3;
+        *g = 0;
+        *b = pos * 3;
+    }
+    else
+    {
+        pos -= 170;
+        *r = 0;
+        *g = pos * 3;
+        *b = 255 - pos * 3;
+    }
+}
+
+static void effect_fill(uint8_t r, uint8_t g, uint8_t b)
+{
+    for (int i = 0; i < LED_COUNT; i++)
+        set_pixel(i, r, g, b);
+    show();
+}
+
+static void effect_wipe(uint8_t r, uint8_t g, uint8_t b, int delay_ms)
+{
+    clear_all();
+    for (int i = 0; i < LED_COUNT; i++)
+    {
+        set_pixel(i, r, g, b);
+        show();
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    }
+}
+
+static void effect_rainbow(int delay_ms)
+{
+    static uint8_t offset = 0;
+    for (int i = 0; i < LED_COUNT; i++)
+    {
+        uint8_t r, g, b;
+        color_wheel((i + offset) & 0xFF, &r, &g, &b);
+        set_pixel(i, r, g, b);
+    }
+    show();
+    offset++;
+    vTaskDelay(pdMS_TO_TICKS(delay_ms));
+}
+
+// -------------------- ESP-NOW ------------------------------------
 rfid_msg_t msg;
 status_msg_t resp;
 
@@ -42,7 +335,8 @@ void espnow_init(void)
 {
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
@@ -59,7 +353,6 @@ void espnow_init(void)
     ESP_ERROR_CHECK(esp_now_init());
     esp_now_register_send_cb(espnow_send_cb);
 }
-
 
 void reader_setup_peer(void)
 {
@@ -89,16 +382,19 @@ void send_uid(const char *uid_str)
 static void reader_recv_cb(const esp_now_recv_info_t *info,
                            const uint8_t *data, int len)
 {
-    if (len < sizeof(status_msg_t)) return;
+    if (len < sizeof(status_msg_t))
+        return;
 
     memcpy(&resp, data, sizeof(resp));
 
-    if (msg.uid[0] == '\0') { // not initialized yet
+    if (msg.uid[0] == '\0')
+    { // not initialized yet
         ESP_LOGW(TAG_NOW, "UID not initialized yet");
         return;
     }
 
-    if (resp.auth_key != ((uint8_t)msg.uid[0] ^ (SECRET_KEY & 0xFF))) {
+    if (resp.auth_key != ((uint8_t)msg.uid[0] ^ (SECRET_KEY & 0xFF)))
+    {
         ESP_LOGW(TAG_NOW, "Bad auth");
         return;
     }
@@ -108,13 +404,17 @@ static void reader_recv_cb(const esp_now_recv_info_t *info,
              resp.status, resp.event_type,
              resp.ticket_id, resp.name, resp.timestamp);
 
-    if (resp.status == 1) {
+    if (resp.status == 1)
+    {
         gpio_set_level(GPIO_NUM_2, 1);
-    } else {
+    }
+    else
+    {
         gpio_set_level(GPIO_NUM_4, 1);
     }
 }
 
+// -------------------------USB-HID -----------------------------
 /**
  * @brief Makes new line depending on report output protocol type
  *
@@ -467,6 +767,35 @@ static bool wait_for_event(EventBits_t event, TickType_t timeout)
 
 void app_main(void)
 {
+    // Buzzer init
+    buzzer_init();
+
+    // LED Init
+    ESP_LOGI(TAG_LED, "Initializing RMT + LED strip driver...");
+
+    // Create LED strip device (WS2812 @ 800kHz)
+    led_strip_config_t strip_cfg = {
+        .strip_gpio_num = LED_GPIO, // Not used when binding to a channel directly
+        .max_leds = LED_COUNT,
+        .led_model = LED_MODEL_WS2812,
+        .color_component_format = LED_COLOR_ORDER,
+        .flags = {.invert_out = 0},
+    };
+
+    led_strip_rmt_config_t rmt_cfg = {
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = RMT_RES_HZ,
+        .mem_block_symbols = 64,
+    };
+
+    // Bind to existing channel (preferred in IDF 5.x):
+    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_cfg, &rmt_cfg, &strip));
+    // Or: ESP_ERROR_CHECK(led_strip_new_rmt_ws2812(&strip_cfg, &rmt_cfg, &strip)); // depending on your IDF minor
+
+    // Clear the LEDs
+    clear_all();
+
+    // RTOS Init and HID init
     TaskHandle_t usb_events_task_handle;
     hid_host_device_handle_t hid_device;
 

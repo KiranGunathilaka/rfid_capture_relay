@@ -48,7 +48,7 @@ typedef struct
 
 #define USB_EVENTS_TO_WAIT (DEVICE_CONNECTED | DEVICE_ADDRESS_MASK | DEVICE_DISCONNECTED)
 
-static const char *TAG = "example";
+static const char *TAG = "RFID";
 static EventGroupHandle_t usb_flags;
 static bool hid_device_connected = false;
 
@@ -125,9 +125,9 @@ typedef struct {
 } rfid_msg_t;
 
 typedef struct {
-    uint8_t status;        // 0 = denied, 1 = granted
+    uint8_t status;        // 0 = Do Not Proceed, 1 = Proceed
     uint32_t timestamp;    // UNIX epoch, or millis since boot
-    uint8_t event_type;    // e.g. ENTRY / EXIT / ERROR
+    uint8_t event_type;    // e.g. ENTRY / EXIT / DENIED / WRONG_GATE
     char ticket_id[16];    // or user ID
     char name[32];         // user name string
     uint32_t auth_key;     // simple shared secret for authenticity
@@ -135,6 +135,17 @@ typedef struct {
 
 #define SECRET_KEY 0xA5A5F00D
 
-    static uint8_t peer_mac[] = {0xF8,0xB3,0xB7,0x26,0x47,0x0C}; //F8:B3:B7:26:47:0C
+static uint8_t peer_mac[] = {0xF8,0xB3,0xB7,0x26,0x47,0x0C}; //F8:B3:B7:26:47:0C
+
+// --------- LED Settings ----------
+#define LED_GPIO            18         // Your data pin to the strip
+#define LED_COUNT           60         // Number of LEDs
+#define LED_COLOR_ORDER     LED_STRIP_COLOR_COMPONENT_FMT_GRB   // WS2812 = GRB
+#define RMT_RES_HZ          10*1000*1000 // 10 MHz RMT tick for accurate WS2812 timings
+
+// --- Buzzer config ------------
+#define BUZZER_GPIO        7
+#define BUZZER_IS_PASSIVE  1   // 1 = passive (needs tone via PWM/LEDC), 0 = active (on/off)
+
 
 #endif // CONFIG_H
