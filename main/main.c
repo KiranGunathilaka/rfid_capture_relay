@@ -393,142 +393,6 @@ static void led_double_flash(uint8_t r, uint8_t g, uint8_t b)
 }
 
 
-// -------------------- ESP-NOW ------------------------------------
-rfid_msg_t msg;
-status_msg_t resp;
-
-static void espnow_send_cb(const esp_now_send_info_t *tx_info, esp_now_send_status_t status)
-{
-    ESP_LOGI(TAG_NOW, "Send status: %s", status == ESP_NOW_SEND_SUCCESS ? "OK" : "FAIL");
-}
-
-void espnow_init(void)
-{
-    // Initialize NVS
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
-    {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
-
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    ESP_ERROR_CHECK(esp_now_init());
-    esp_now_register_send_cb(espnow_send_cb);
-}
-
-void reader_setup_peer(void)
-{
-    esp_now_peer_info_t peer = {};
-    memcpy(peer.peer_addr, peer_mac, 6);
-    peer.channel = 0;
-    peer.encrypt = false;
-    ESP_ERROR_CHECK(esp_now_add_peer(&peer));
-}
-
-void send_uid(const char *uid_str)
-{
-    memset(&msg, 0, sizeof(msg));
-
-    strncpy(msg.uid, uid_str, sizeof(msg.uid) - 1);
-    msg.dev_id = device_id;
-
-    // simple obfuscation: XOR every char with SECRET_KEY LSB
-    for (size_t i = 0; i < strlen(msg.uid); i++)
-    {
-        msg.uid[i] ^= (SECRET_KEY & 0xFF);
-    }
-
-    esp_now_send(peer_mac, (uint8_t *)&msg, sizeof(msg));
-}
-
-static void reader_recv_cb(const esp_now_recv_info_t *info,
-                           const uint8_t *data, int len)
-{
-    if (len < sizeof(status_msg_t))
-        return;
-
-    memcpy(&resp, data, sizeof(resp));
-
-    if (msg.uid[0] == '\0')
-    {
-        ESP_LOGW(TAG_NOW, "UID not initialized yet");
-        return;
-    }
-    if (resp.auth_key != ((uint8_t)msg.uid[0] ^ (SECRET_KEY & 0xFF)))
-    {
-        ESP_LOGW(TAG_NOW, "Bad auth");
-        // Red single flash + error chirp
-        led_flash_color(60, 0, 0, 300);
-        buzzer_error();
-        return;
-    }
-
-    ESP_LOGI(TAG_NOW,
-             "status=%d event=%d ticket=%s name=%s time=%" PRIu32,
-             resp.status, resp.event_type,
-             resp.ticket_id, resp.name, resp.timestamp);
-
-    // drive the two indicator GPIOs (optional)
-    gpio_set_level(GPIO_NUM_2, resp.status == 1 ? 1 : 0);
-    gpio_set_level(GPIO_NUM_4, resp.status == 1 ? 0 : 1);
-
-    // ---- Decide LED + buzzer pattern ----
-    if (resp.status == 1)
-    {
-        // granted
-        switch (resp.event_type)
-        {
-        case EVT_ENTRY:
-            // green double-flash + success tri-tone
-            led_double_flash(0, 60, 0);
-            buzzer_success();
-            break;
-        case EVT_EXIT:
-            // cyan single flash + short beep
-            led_flash_color(0, 40, 40, 250);
-            buzzer_beep();
-            break;
-        default:
-            // granted but unknown event → soft white flash + single beep
-            led_flash_color(40, 40, 40, 250);
-            buzzer_beep();
-            break;
-        }
-    }
-    else
-    {
-        // denied / warning
-        switch (resp.event_type)
-        {
-        case EVT_DENIED:
-            // strong red flash (longer) + error melody
-            led_flash_color(80, 0, 0, 600);
-            buzzer_error();
-            break;
-        case EVT_WRONG_GATE:
-            // amber (yellowish) double flash + two medium beeps
-            led_double_flash(70, 35, 0);
-            buzzer_tone(1200, 120, 500);
-            buzzer_tone(900, 120, 500); // queued via timer chain in melody? Keep quick second call after ~150ms if you want
-            break;
-        default:
-            // unknown not-granted → magenta flash + short beep
-            led_flash_color(60, 0, 60, 300);
-            buzzer_beep();
-            break;
-        }
-    }
-}
-
 // -------------------------USB-HID -----------------------------
 /**
  * @brief Makes new line depending on report output protocol type
@@ -868,6 +732,141 @@ static bool wait_for_event(EventBits_t event, TickType_t timeout)
     return xEventGroupWaitBits(usb_flags, event, pdTRUE, pdTRUE, timeout) & event;
 }
 
+
+// -------------------- ESP-NOW ------------------------------------
+rfid_msg_t msg;
+status_msg_t resp;
+
+static void espnow_send_cb(const esp_now_send_info_t *tx_info, esp_now_send_status_t status)
+{
+    ESP_LOGI(TAG_NOW, "Send status: %s", status == ESP_NOW_SEND_SUCCESS ? "OK" : "FAIL");
+}
+
+void espnow_init(void)
+{
+    // Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    ESP_ERROR_CHECK(esp_now_init());
+    esp_now_register_send_cb(espnow_send_cb);
+}
+
+void reader_setup_peer(void)
+{
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, peer_mac, 6);
+    peer.channel = 0;
+    peer.encrypt = false;
+    ESP_ERROR_CHECK(esp_now_add_peer(&peer));
+}
+
+void send_uid(const char *uid_str)
+{
+    memset(&msg, 0, sizeof(msg));
+
+    strncpy(msg.uid, uid_str, sizeof(msg.uid) - 1);
+    msg.dev_id = device_id;
+
+    // simple obfuscation: XOR every char with SECRET_KEY LSB
+    for (size_t i = 0; i < strlen(msg.uid); i++)
+    {
+        msg.uid[i] ^= (SECRET_KEY & 0xFF);
+    }
+
+    esp_now_send(peer_mac, (uint8_t *)&msg, sizeof(msg));
+}
+
+static void reader_recv_cb(const esp_now_recv_info_t *info,
+                           const uint8_t *data, int len)
+{
+    if (len < sizeof(status_msg_t))
+        return;
+
+    memcpy(&resp, data, sizeof(resp));
+
+    if (msg.uid[0] == '\0')
+    {
+        ESP_LOGW(TAG_NOW, "UID not initialized yet");
+        return;
+    }
+    if (resp.auth_key != ((uint8_t)msg.uid[0] ^ (SECRET_KEY & 0xFF)))
+    {
+        ESP_LOGW(TAG_NOW, "Bad auth");
+        // Red single flash + error chirp
+        led_flash_color(60, 0, 0, 300);
+        buzzer_error();
+        return;
+    }
+
+    ESP_LOGI(TAG_NOW,
+             "status=%d event=%d ticket=%s name=%s time=%" PRIu32,
+             resp.status, resp.event_type,
+             resp.ticket_id, resp.name, resp.timestamp);
+
+
+    // ---- Decide LED + buzzer pattern ----
+    if (resp.status == 1)
+    {
+        // granted
+        switch (resp.event_type)
+        {
+        case EVT_ENTRY:
+            // green double-flash + success tri-tone
+            led_double_flash(0, 60, 0);
+            buzzer_success();
+            break;
+        case EVT_EXIT:
+            // cyan single flash + short beep
+            led_flash_color(0, 40, 40, 250);
+            buzzer_beep();
+            break;
+        default:
+            // granted but unknown event → soft white flash + single beep
+            led_flash_color(40, 40, 40, 250);
+            buzzer_beep();
+            break;
+        }
+    }
+    else
+    {
+        // denied / warning
+        switch (resp.event_type)
+        {
+        case EVT_DENIED:
+            // strong red flash (longer) + error melody
+            led_flash_color(80, 0, 0, 600);
+            buzzer_error();
+            break;
+        case EVT_WRONG_GATE:
+            // amber (yellowish) double flash + two medium beeps
+            led_double_flash(70, 35, 0);
+            buzzer_tone(1200, 120, 500);
+            buzzer_tone(900, 120, 500); // queued via timer chain in melody? Keep quick second call after ~150ms if you want
+            break;
+        default:
+            // unknown not-granted → magenta flash + short beep
+            led_flash_color(60, 0, 60, 300);
+            buzzer_beep();
+            break;
+        }
+    }
+}
+
+
 void app_main(void)
 {
     // 0) Configure status pins as outputs once
@@ -906,14 +905,13 @@ void app_main(void)
 
     // 3) Startup animation (quick and non-blocking)
     //   • blue flash, then green, then white; success chirp
-    led_flash_color(0, 0, 60, 200);
+    led_flash_color(0, 0, 100, 500);
     vTaskDelay(pdMS_TO_TICKS(240));
-    led_flash_color(0, 60, 0, 200);
+    led_flash_color(0, 100, 0, 500);
     vTaskDelay(pdMS_TO_TICKS(240));
-    led_flash_color(40, 40, 40, 220);
+    led_flash_color(100, 0, 0, 500);
     buzzer_success();
 
-    // ---- the rest of your original app_main() stays the same ----
     // RTOS Init and HID init
     TaskHandle_t usb_events_task_handle;
     hid_host_device_handle_t hid_device;

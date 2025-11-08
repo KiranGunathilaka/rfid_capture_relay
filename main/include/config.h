@@ -143,11 +143,15 @@ typedef struct {
 
 #define SECRET_KEY 0xA5A5F00D
 
-static uint8_t peer_mac[] = {0xF8,0xB3,0xB7,0x26,0x47,0x0C}; //F8:B3:B7:26:47:0C
+// static uint8_t peer_mac[] = {0xF8,0xB3,0xB7,0x26,0x47,0x0C}; //Test my esp32
+// static uint8_t peer_mac[] = {0x80,0xB5,0x4E,0xD7,0xBE,0x44};  //80:B5:4E:D7:BE:44   Entry
+static uint8_t peer_mac[] = {0x80,0xB5,0x4E,0xD7,0x0D,0x78};  //80:B5:4E:D7:0D:78   Exit
+// static uint8_t peer_mac[] = {0x80,0xB5,0x4E,0xD7,0xAD,0xE4};  //80:B5:4E:D7:AD:E4   VIP
+// static uint8_t peer_mac[] = {0x80,0xB5,0x4E,0xD8,0x52,0x20};  //80:B5:4E:D8:52:20  Backstage
 
 // --------- LED Settings ----------
 #define LED_GPIO            18         // Your data pin to the strip
-#define LED_COUNT           60         // Number of LEDs
+#define LED_COUNT           90         // Number of LEDs
 #define LED_COLOR_ORDER     LED_STRIP_COLOR_COMPONENT_FMT_GRB   // WS2812 = GRB
 #define RMT_RES_HZ          10*1000*1000 // 10 MHz RMT tick for accurate WS2812 timings
 
