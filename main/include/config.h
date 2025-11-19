@@ -17,8 +17,6 @@
 static char rfid_buf[64];
 static size_t rfid_len = 0;
 
-static uint8_t const device_id = 101;
-
 /**
  * @brief Application Event from USB Host driver
  *
@@ -128,7 +126,7 @@ typedef struct {
 typedef struct {
     uint8_t status;        // 0 = Do Not Proceed, 1 = Proceed
     uint32_t timestamp;    // UNIX epoch, or millis since boot
-    uint8_t event_type;    // e.g. ENTRY / EXIT / DENIED / WRONG_GATE
+    uint8_t event_type;    // ENTRY / EXIT / DENIED / WRONG_GATE
     char ticket_id[16];    // or user ID
     char name[32];         // user name string
     uint32_t auth_key;     // simple shared secret for authenticity
@@ -143,9 +141,11 @@ typedef struct {
 
 #define SECRET_KEY 0xA5A5F00D
 
+static uint8_t const device_id = 202; //0-49 VIP, 50-99 Backstage, 100-199 entry, 200-299 exit, 301 Admin
+
 // static uint8_t peer_mac[] = {0xF8,0xB3,0xB7,0x26,0x47,0x0C}; //Test my esp32
 // static uint8_t peer_mac[] = {0x80,0xB5,0x4E,0xD7,0xBE,0x44};  //80:B5:4E:D7:BE:44   Entry
-static uint8_t peer_mac[] = {0x80,0xB5,0x4E,0xD7,0x0D,0x78};  //80:B5:4E:D7:0D:78   Exit
+ static uint8_t peer_mac[] = {0x80,0xB5,0x4E,0xD7,0x0D,0x78};  //80:B5:4E:D7:0D:78   Exit
 // static uint8_t peer_mac[] = {0x80,0xB5,0x4E,0xD7,0xAD,0xE4};  //80:B5:4E:D7:AD:E4   VIP
 // static uint8_t peer_mac[] = {0x80,0xB5,0x4E,0xD8,0x52,0x20};  //80:B5:4E:D8:52:20  Backstage
 
