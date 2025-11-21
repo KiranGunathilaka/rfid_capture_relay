@@ -328,6 +328,7 @@ static esp_timer_handle_t led_clear_timer = NULL;
 static void led_clear_cb(void *arg)
 {
     clear_all();
+    effect_fill(255, 255, 255);
 }
 
 // set whole strip to a color, then auto-clear after duration_ms (non-blocking)
@@ -466,7 +467,6 @@ static void reader_recv_cb(const esp_now_recv_info_t *info,
     if (resp.auth_key != ((uint8_t)msg.uid[0] ^ (SECRET_KEY & 0xFF)))
     {
         ESP_LOGW(TAG_NOW, "Bad auth");
-        // Red single flash + error chirp
         led_flash_color(60, 0, 0, 300);
         buzzer_error();
         return;
@@ -486,17 +486,17 @@ static void reader_recv_cb(const esp_now_recv_info_t *info,
         {
         case EVT_ENTRY:
             // green double-flash + success tri-tone
-            led_flash_color(0, 100, 0, 2000);
+            led_flash_color(0, 100, 0, 1000);
             buzzer_success();
             break;
         case EVT_EXIT:
             // cyan single flash + short beep
-            led_flash_color(0, 100, 0, 2000);
+            led_flash_color(0, 100, 0, 1000);
             buzzer_success();
             break;
         default:
             // granted but unknown event
-            led_double_flash(60, 0, 60, 1000);
+            led_flash_color(60, 0, 60, 1000);
             buzzer_beep();
             break;
         }
@@ -506,16 +506,16 @@ static void reader_recv_cb(const esp_now_recv_info_t *info,
         switch (resp.event_type)
         {
         case EVT_DENIED:
-            led_flash_color(100, 80, 0, 2000);
+            led_flash_color(100, 0, 100, 1000);
             buzzer_tone(1200, 120, 500);
             buzzer_tone(900, 120, 500);
             break;
         case EVT_WRONG_GATE:
-            led_flash_color(100, 0, 0, 2000);
+            led_flash_color(100, 100, 0, 1000);
             buzzer_error();
             break;
         default:
-            led_flash_color(0, 100, 1000, 1000);
+            led_flash_color(100, 0, 0, 1000);
             buzzer_error();
             break;
         }
