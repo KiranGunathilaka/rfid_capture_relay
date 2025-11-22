@@ -3,7 +3,6 @@
  *
  * SPDX-License-Identifier: Unlicense OR CC0-1.0
  */
-
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
@@ -38,7 +37,6 @@ static const char *TAG_LED = "WS2812";
 static const char *TAG_BUZ = "BUZZER";
 
 // --------------- Buzzer -----------------------------
-
 static bool buzzer_is_init = false;
 static esp_timer_handle_t buzzer_stop_timer = NULL;
 
@@ -230,18 +228,43 @@ static void buzzer_seq_step(void *arg)
     ESP_ERROR_CHECK(esp_timer_start_once(s->timer, (uint64_t)dur * 1000));
 }
 
-// Example tunes
+// Buzzer tunes
 static void buzzer_success(void)
 {
     static const uint16_t f[] = {1200, 1600, 2000};
     static const uint16_t d[] = {100, 100, 160};
     buzzer_seq_start(f, d, NULL, 3);
 }
+
 static void buzzer_error(void)
 {
     static const uint16_t f[] = {400, 300, 250, 200};
     static const uint16_t d[] = {120, 120, 120, 240};
     buzzer_seq_start(f, d, NULL, 4);
+}
+
+// Banned: "angry" low descending tone
+static void buzzer_banned(void)
+{
+    static const uint16_t f[] = {700, 500, 350};
+    static const uint16_t d[] = {120, 120, 200};
+    buzzer_seq_start(f, d, NULL, 3);
+}
+
+// Expired: three short mid-frequency beeps
+static void buzzer_expired(void)
+{
+    static const uint16_t f[] = {1300, 1300, 1300};
+    static const uint16_t d[] = {80, 80, 160};
+    buzzer_seq_start(f, d, NULL, 3);
+}
+
+// Unknown card: high-then-low "question mark" pattern
+static void buzzer_unknown(void)
+{
+    static const uint16_t f[] = {2000, 800};
+    static const uint16_t d[] = {120, 200};
+    buzzer_seq_start(f, d, NULL, 2);
 }
 
 //----------------------------WS2812 ------------------------
@@ -328,7 +351,7 @@ static esp_timer_handle_t led_clear_timer = NULL;
 static void led_clear_cb(void *arg)
 {
     clear_all();
-    effect_fill(255, 255, 255);
+    //effect_fill(255, 255, 255);
 }
 
 // set whole strip to a color, then auto-clear after duration_ms (non-blocking)
@@ -478,44 +501,66 @@ static void reader_recv_cb(const esp_now_recv_info_t *info,
              resp.ticket_id, resp.name, resp.timestamp);
 
 
-    // ---- Decide LED + buzzer pattern ----
+        // ---- Decide LED + buzzer pattern ----
     if (resp.status == 1)
     {
-        // granted
+        // Granted
         switch (resp.event_type)
         {
         case EVT_ENTRY:
-            // green double-flash + success tri-tone
-            led_flash_color(0, 100, 0, 1000);
-            buzzer_success();
-            break;
         case EVT_EXIT:
-            // cyan single flash + short beep
-            led_flash_color(0, 100, 0, 1000);
+            // Green flash + success tri-tone
+            led_flash_color(0, 255, 0, 1000);
             buzzer_success();
             break;
+
         default:
-            // granted but unknown event
-            led_flash_color(60, 0, 60, 1000);
+            // Granted but unknown event code – treat as generic OK
+            led_flash_color(0, 255, 0, 1000);
             buzzer_beep();
             break;
         }
-    }else
+    }
+    else
     {
-        // denied / warning
+        // Denied / warning
         switch (resp.event_type)
         {
-        case EVT_DENIED:
-            led_flash_color(100, 0, 100, 1000);
-            buzzer_tone(1200, 120, 500);
-            buzzer_tone(900, 120, 500);
-            break;
         case EVT_WRONG_GATE:
-            led_flash_color(100, 100, 0, 1000);
+            // In at entry gate twice, or Out at exit gate twice
+            led_flash_color(255, 0, 0, 1000);   // solid red
             buzzer_error();
             break;
+
+        case EVT_DENIED_BANNED:
+            // Banned user – orange
+            led_flash_color(255, 150, 0, 2000);
+            buzzer_banned();
+            break;
+
+        case EVT_DENIED_EXPIRED:
+            // Expired ticket – blue
+            led_flash_color(255, 150, 0, 2000);
+            buzzer_expired();
+            break;
+
+        case EVT_DENIED_UNKNOWN:
+            // Unknown RFID (not in DB) – magenta
+            led_flash_color(160, 0, 160, 1500);
+            buzzer_unknown();
+            break;
+
+        case EVT_DENIED_AUDIENCE:
+            // Wrong audience (e.g. Common user at VIP gate)
+            led_flash_color(255, 0, 0, 1000);
+            buzzer_error();
+            break;
+
+        case EVT_DENIED_ERROR:
+        case EVT_DENIED_GENERIC:
         default:
-            led_flash_color(100, 0, 0, 1000);
+            // Generic error / fallback
+            led_flash_color(0, 120, 120, 1500);
             buzzer_error();
             break;
         }
